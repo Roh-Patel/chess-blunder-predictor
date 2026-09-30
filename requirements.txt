@@ -1,0 +1,11 @@
+python-chess
+zstandard
+pandas
+pyarrow
+numpy
+scikit-learn
+lightgbm
+matplotlib
+tqdm
+ipykernel
+pytest

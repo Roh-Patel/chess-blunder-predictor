@@ -1,0 +1,33 @@
+# Environment
+.venv/
+venv/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data (large and reproducible)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+*.pgn
+*.pgn.zst
+*.parquet
+
+# Models and experiment logs
+models/*.pt
+models/*.pth
+models/*.ckpt
+wandb/
+runs/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
