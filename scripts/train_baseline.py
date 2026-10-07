@@ -25,7 +25,7 @@ def load_training_table(path: str) -> pd.DataFrame:
     first = df[df.ply <= 2].groupby("game_id").time_spent.max()
     berserk = set(first[first > 200].index)
     df = df[~df.game_id.isin(berserk)]
-    # Skip opening plies, and positions where a blunder is impossible by construction.s
+    # Skip opening plies, and positions where a blunder is impossible by construction.
     df = df[(df.ply > 10) & (df.wp_before >= BLUNDER_DROP)].copy()
     df["y"] = (df.wp_drop >= BLUNDER_DROP).astype(int)
     df["elo_diff"] = df.mover_elo - df.opp_elo
@@ -131,7 +131,7 @@ def main() -> None:
     report_clock_effect(val, preds)
     report_by_position_band(val, preds["D: A + board + clock"])
     imp = pd.Series(last_model.feature_importance("gain"), index=sets["D: A + board + clock"])
-    
+
     print("\nTop features (model D, gain):")
     print((imp / imp.sum()).sort_values(ascending=False).head(12).round(3).to_string())
 
