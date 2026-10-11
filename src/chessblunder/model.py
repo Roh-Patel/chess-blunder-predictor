@@ -25,7 +25,7 @@ class BlunderNet(nn.Module):
             nn.Conv2d(in_planes, channels, 3, padding=1, bias=False), nn.BatchNorm2d(channels), nn.ReLU())
         self.tower = nn.Sequential(*[ResBlock(channels) for _ in range(blocks)])
         self.reduce = nn.Sequential(nn.Conv2d(channels, 32, 1, bias=False), nn.BatchNorm2d(32), nn.ReLU())
-        self.scalar_net = nn.Sequential(nn.Linear(n_scalars, 64), nn.ReLU())
+        self.scalar_net = nn.Sequential(nn.Linear(n_scalars, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU())
         self.head = nn.Sequential(
             nn.Linear(32 * 8 * 8 + 64, hidden), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden, 1))
 
