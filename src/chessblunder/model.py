@@ -19,7 +19,7 @@ class ResBlock(nn.Module):
 
 class BlunderNet(nn.Module):
     def __init__(self, in_planes: int, n_scalars: int, channels: int = 64, blocks: int = 6,
-                 hidden: int = 256, dropout: float = 0.2):
+                 hidden: int = 256, dropout: float = 0.2, n_outputs: int = 1):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(in_planes, channels, 3, padding=1, bias=False), nn.BatchNorm2d(channels), nn.ReLU())
@@ -27,9 +27,9 @@ class BlunderNet(nn.Module):
         self.reduce = nn.Sequential(nn.Conv2d(channels, 32, 1, bias=False), nn.BatchNorm2d(32), nn.ReLU())
         self.scalar_net = nn.Sequential(nn.Linear(n_scalars, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU())
         self.head = nn.Sequential(
-            nn.Linear(32 * 8 * 8 + 64, hidden), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden, 1))
+            nn.Linear(32 * 8 * 8 + 64, hidden), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden, n_outputs))
 
     def forward(self, planes, scalars):
         board = self.reduce(self.tower(self.stem(planes))).flatten(1)
         features = torch.cat([board, self.scalar_net(scalars)], dim=1)
-        return self.head(features).squeeze(1)  # one logit per position
+        return self.head(features)

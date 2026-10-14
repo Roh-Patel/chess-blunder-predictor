@@ -7,11 +7,13 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 from tqdm import tqdm
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from chessblunder.features import board_features
 from chessblunder.labelling import BLUNDER_DROP
 
-COLUMNS = ["game_id", "ply", "fen", "mover_is_white", "mover_elo", "opp_elo",
+COLUMNS = ["game_id", "ply", "mover_is_white", "mover_elo", "opp_elo",
            "clock_before", "opp_clock", "time_spent", "wp_before", "wp_drop", "split"]
 
 RATING = ["mover_elo", "opp_elo", "elo_diff"]
@@ -32,6 +34,12 @@ def load_training_table(path: str) -> pd.DataFrame:
     df["clock_diff"] = df.clock_before - df.opp_clock
     df["mover_is_white"] = df.mover_is_white.astype(int)
     return df
+
+
+def attach_fens(sample: pd.DataFrame, path: str) -> pd.DataFrame:
+    """Add the FEN column for just the sampled rows (the index is the row position in the parquet file)."""
+    fens = pq.read_table(path, columns=["fen"]).column("fen").take(pa.array(sample.index.to_numpy()))
+    return sample.assign(fen=fens.to_pylist())
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -108,8 +116,8 @@ def main() -> None:
     args = parser.parse_args()
 
     df = load_training_table(args.data)
-    train = build_features(df[df.split == "train"].sample(min(args.train_rows, (df.split == "train").sum()), random_state=0))
-    val = build_features(df[df.split == "val"].sample(min(args.val_rows, (df.split == "val").sum()), random_state=0))
+    train = build_features(attach_fens(df[df.split == "train"].sample(min(args.train_rows, (df.split == "train").sum()), random_state=0), args.data))
+    val = build_features(attach_fens(df[df.split == "val"].sample(min(args.val_rows, (df.split == "val").sum()), random_state=0), args.data))
     pd.concat([train.assign(split="train"), val.assign(split="val")]).to_parquet(args.cache)
 
     board_cols = list(board_features(chess.STARTING_FEN))

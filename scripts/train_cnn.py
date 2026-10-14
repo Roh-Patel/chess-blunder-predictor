@@ -1,4 +1,4 @@
-"""Stage 4: residual CNN on board planes + ratings/clock/ply, compared with the LightGBM baseline."""
+"""Stage 4: residual CNN on board planes + scalar features, compared with the LightGBM baseline."""
 import argparse
 import time
 
@@ -11,29 +11,31 @@ from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 
 from chessblunder.encoding import N_PLANES, get_planes, scalar_features
 from chessblunder.features import board_features
+from chessblunder.labelling import BLUNDER_DROP
 from chessblunder.model import BlunderNet
-from train_baseline import BASE, CLOCK, fit_and_score, load_training_table, paired_gain
+from train_baseline import BASE, CLOCK, attach_fens, fit_and_score, load_training_table, paired_gain
 
 
-def predict(model, planes, scalars, device, batch_size=4096) -> np.ndarray:
+def predict(model, planes, scalars, device, primary: int, batch_size=4096) -> np.ndarray:
+    """Probability of a blunder at the primary threshold for every position."""
     model.eval()
     out = []
     with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
         for i in range(0, len(planes), batch_size):
             logits = model(planes[i:i + batch_size].float(), scalars[i:i + batch_size])
-            out.append(torch.sigmoid(logits.float()).cpu())
+            out.append(torch.sigmoid(logits[:, primary].float()).cpu())
     return torch.cat(out).numpy()
 
 
-def train_model(model, train_t, val_t, val_y, args, device) -> dict:
-    """Train with early stopping on validation log loss. This gives the best weights."""
-    tr_planes, tr_scalars, tr_y = train_t
+def train_model(model, train_t, val_t, val_y, args, device, primary: int) -> dict:
+    """Train with early stopping on validation log loss (primary threshold); returns the best weights."""
+    tr_planes, tr_scalars, tr_y = train_t  # tr_y has one column per blunder threshold
     va_planes, va_scalars = val_t
     n = len(tr_y)
     steps = n // args.batch_size  # the incomplete last batch is dropped (a different one each epoch)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps)
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn = nn.BCEWithLogitsLoss()  # averages over all thresholds
     best_ll, best_state, bad_epochs = float("inf"), None, 0
 
     for epoch in range(1, args.epochs + 1):
@@ -51,7 +53,7 @@ def train_model(model, train_t, val_t, val_y, args, device) -> dict:
             opt.step()
             sched.step()
             running += loss.detach()
-        p = predict(model, va_planes, va_scalars, device)
+        p = predict(model, va_planes, va_scalars, device, primary)
         ll, pr = log_loss(val_y, p), average_precision_score(val_y, p)
         print(f"epoch {epoch:2d}  train loss {running.item() / steps:.4f}  val log loss {ll:.4f}  "
               f"val PR-AUC {pr:.4f}  ({time.perf_counter() - t0:.0f}s)")
@@ -107,16 +109,21 @@ def check_rows(rows: pd.DataFrame, cached: pd.DataFrame, name: str) -> None:
         ok = (aligned.game_id.to_numpy() == rows.game_id.to_numpy()).all() and (aligned.ply.to_numpy() == rows.ply.to_numpy()).all()
     if not ok:
         raise SystemExit(f"{name} rows differ from the cached baseline features; "
-                         "rerun train_baseline.py with the same --train-rows and --val-rows.")
+                         "rerun train_baseline.py with the same --data, --train-rows and --val-rows.")
 
 
 def print_gains(title: str, val: pd.DataFrame, p_ref, p_new) -> None:
-    print(f"\n{title} (positive = second model better; 95% CI resamples games)")
+    print(f"\n{title} (positive = first model better; 95% CI resamples games)")
     for label, mask in (("all rows", np.ones(len(val), dtype=bool)),
                         ("clock <= 120s", (val.clock_before <= 120).to_numpy()),
                         ("clock <= 60s", (val.clock_before <= 60).to_numpy())):
         gain, (lo, hi) = paired_gain(val, p_ref, p_new, mask)
         print(f"{label:14s} n={mask.sum():>8,}  gain={gain:+.5f}  CI [{lo:+.5f}, {hi:+.5f}]")
+
+
+def make_labels(df: pd.DataFrame, thresholds: list[float]) -> np.ndarray:
+    """One 0/1 label column per blunder threshold (win-probability drop >= threshold)."""
+    return np.stack([df.wp_drop.to_numpy() >= t for t in thresholds], axis=1).astype(np.float32)
 
 
 def main() -> None:
@@ -133,18 +140,27 @@ def main() -> None:
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=0, help="seed for initialisation and batch order")
+    parser.add_argument("--thresholds", type=float, nargs="+", default=[BLUNDER_DROP],
+                        help="blunder thresholds to train on (must include 0.15, which is the one evaluated)")
     parser.add_argument("--no-clock", action="store_true", help="leave the clock features out")
     parser.add_argument("--hybrid", action="store_true",
                         help="also feed the hand-crafted board features to the scalar branch")
     parser.add_argument("--tag", default=None, help="name used for the saved files (default: derived from options)")
     args = parser.parse_args()
 
-    torch.manual_seed(0)
+    thresholds = sorted(set(args.thresholds))
+    primary = min(range(len(thresholds)), key=lambda i: abs(thresholds[i] - BLUNDER_DROP))
+    if abs(thresholds[primary] - BLUNDER_DROP) > 1e-9:
+        raise SystemExit(f"--thresholds must include {BLUNDER_DROP}")
+
+    torch.manual_seed(args.seed)
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_clock = not args.no_clock
-    tag = args.tag or (("hybrid_" if args.hybrid else "") + ("clock" if use_clock else "noclock"))
-    print(f"device: {device}   clock features: {use_clock}   hybrid: {args.hybrid}   tag: {tag}")
+    tag = args.tag or (("hybrid_" if args.hybrid else "") + ("mt_" if len(thresholds) > 1 else "")
+                       + ("clock" if use_clock else "noclock"))
+    print(f"device: {device}   clock: {use_clock}   hybrid: {args.hybrid}   seed: {args.seed}   tag: {tag}")
 
     # Same rows as the baseline: same filters and the same seeded sampling
     df = load_training_table(args.data)
@@ -168,22 +184,30 @@ def main() -> None:
     del cached, c_train, c_val
     mu, sd = tr_x.mean(axis=0), tr_x.std(axis=0) + 1e-6  # standardise with training statistics only
     tr_x, va_x = (tr_x - mu) / sd, (va_x - mu) / sd
+
+    tr_labels = make_labels(train, thresholds)
+    assert (tr_labels[:, primary] == train.y.to_numpy()).all()  # the primary column is the usual label
+    print("blunder thresholds and training base rates:",
+          ", ".join(f"{t:.2f}: {r:.3f}" for t, r in zip(thresholds, tr_labels.mean(axis=0))))
+
+    train, val = attach_fens(train, args.data), attach_fens(val, args.data)  # FENs only for the sampled rows
     tr_planes, va_planes = get_planes(train, "train"), get_planes(val, "val")
 
-    # Everything fits in GPU memory (about 2.7 GB of uint8 planes for 2M + 454k rows)
+    # Everything lives in GPU memory, so batches are sliced on the GPU directly
     train_t = (torch.from_numpy(tr_planes).to(device), torch.from_numpy(tr_x).to(device),
-               torch.tensor(train.y.to_numpy(), dtype=torch.float32, device=device))
+               torch.from_numpy(tr_labels).to(device))
     val_t = (torch.from_numpy(va_planes).to(device), torch.from_numpy(va_x).to(device))
     val_y = val.y.to_numpy()
+    del tr_planes, va_planes
 
     model = BlunderNet(N_PLANES, tr_x.shape[1], channels=args.channels, blocks=args.blocks,
-                       dropout=args.dropout).to(device)
+                       dropout=args.dropout, n_outputs=len(thresholds)).to(device)
     print(f"parameters: {sum(p.numel() for p in model.parameters()):,}   scalar inputs: {tr_x.shape[1]}")
-    best_state = train_model(model, train_t, val_t, val_y, args, device)
+    best_state = train_model(model, train_t, val_t, val_y, args, device, primary)
     model.load_state_dict(best_state)
     torch.save(best_state, f"models/cnn_{tag}.pt")
 
-    p_cnn = predict(model, *val_t, device)
+    p_cnn = predict(model, *val_t, device, primary)
     np.save(f"data/processed/cnn_val_preds_{tag}.npy", p_cnn)
     p_lgb = lightgbm_reference(val, use_clock, args.cache)
     p_blend = 0.5 * p_cnn + 0.5 * p_lgb  # one fixed weight, nothing tuned on validation data

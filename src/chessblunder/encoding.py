@@ -1,5 +1,6 @@
 """Encode positions as CNN inputs: board planes (always from the mover's point of view) and scalar features."""
 from pathlib import Path
+import hashlib
 
 import chess
 import numpy as np
@@ -44,8 +45,9 @@ def encode_many(fens: list[str]) -> np.ndarray:
 
 
 def get_planes(df: pd.DataFrame, split: str, cache_dir: str = "data/processed") -> np.ndarray:
-    """Encode a dataframe's FENs, caching the result on disk."""
-    path = Path(cache_dir) / f"planes_{split}_{len(df)}.npy"
+    """Encode a dataframe's FENs, caching the result on disk. The cache key includes the row indices => different samples of the same size don't share a file."""
+    key = hashlib.md5(df.index.to_numpy().tobytes()).hexdigest()[:8]
+    path = Path(cache_dir) / f"planes_{split}_{len(df)}_{key}.npy"
     if path.exists():
         return np.load(path)
     planes = encode_many(df.fen.tolist())
