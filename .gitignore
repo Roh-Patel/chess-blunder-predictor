@@ -21,6 +21,8 @@ data/processed/*
 
 # Models and experiment logs
 models/*.pt
+!models/cnn_big_hybrid_s*.pt
+!models/scaler.npz
 models/*.pth
 models/*.ckpt
 wandb/
